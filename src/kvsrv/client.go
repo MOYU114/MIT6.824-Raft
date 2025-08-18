@@ -1,9 +1,11 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	server *labrpc.ClientEnd
@@ -36,8 +38,26 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 
+	ID := nrand() // generate a unique request ID
+	args := &GetArgs{
+		Key:        key,
+		ID:         ID,
+		CanRelease: false, // do not release the cache yet
+	}
+	reply := &GetReply{}
+
+	ok := false
+	for !ok {
+		ok = ck.server.Call("KVServer.Get", args, &reply)
+	}
+
+	args.CanRelease = true // confirm received, release the cache
+	releaseOK := false
+	for !releaseOK {
+		releaseOK = ck.server.Call("KVServer.Get", args, &reply)
+	}
 	// You will have to modify this function.
-	return ""
+	return reply.Value
 }
 
 // shared by Put and Append.
@@ -50,7 +70,25 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
-	return ""
+	ID := nrand() // generate a unique request ID
+	args := &PutAppendArgs{
+		Key:        key,
+		Value:      value,
+		ID:         ID,
+		CanRelease: false, // do not release the cache yet
+	}
+	reply := &PutAppendReply{}
+	ok := false
+	for !ok {
+		ok = ck.server.Call("KVServer."+op, args, &reply)
+	}
+	args.CanRelease = true // confirm received, release the cache
+	releaseOK := false
+	for !releaseOK {
+		releaseOK = ck.server.Call("KVServer."+op, args, &reply)
+	}
+
+	return reply.Value
 }
 
 func (ck *Clerk) Put(key string, value string) {
