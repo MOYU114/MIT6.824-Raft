@@ -1109,8 +1109,9 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 	cfg.one(rand.Int(), servers, true)
 	leader1 := cfg.checkOneLeader()
-
+	DPrintf("Setup finished.\n")
 	for i := 0; i < iters; i++ {
+		DPrintf("Current iters: %d\n", i)
 		victim := (leader1 + 1) % servers
 		sender := leader1
 		if i%3 == 1 {
@@ -1120,11 +1121,13 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 		if disconnect {
 			cfg.disconnect(victim)
+			DPrintf("Disconneted {%d} successfully.\n", victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
 			cfg.crash1(victim)
 			cfg.one(rand.Int(), servers-1, true)
+			DPrintf("Crash {%d} successfully.\n", victim)
 		}
 
 		// perhaps send enough to get a snapshot
@@ -1140,7 +1143,9 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// TestSnapshotBasic3D().
 			cfg.one(rand.Int(), servers, true)
 		} else {
+			DPrintf("flag1\n")
 			cfg.one(rand.Int(), servers-1, true)
+			DPrintf("flag2\n")
 		}
 
 		if cfg.LogSize() >= MAXLOGSIZE {
@@ -1150,12 +1155,17 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a snapshot to catch up.
 			cfg.connect(victim)
+			DPrintf("{Node:%v} reconnected.\n", victim)
 			cfg.one(rand.Int(), servers, true)
+			DPrintf("Meg sent\n")
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
+			DPrintf("{Node:%v} reboot.\n", victim)
 			cfg.start1(victim, cfg.applierSnap)
+			DPrintf("{Node:%v} rebooted.\n", victim)
 			cfg.connect(victim)
+			DPrintf("{Node:%v} reconnected.\n", victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
