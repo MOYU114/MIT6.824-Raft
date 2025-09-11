@@ -174,23 +174,9 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.lastSnapshotIndex = lastSnapshotIndex
 		rf.lastSnapshotTerm = lastSnapshotTerm
 		rf.log = log
+		rf.commitIndex = rf.lastSnapshotIndex
+		rf.lastApplied = rf.lastSnapshotIndex
 	}
-	// snapshot := rf.persister.ReadSnapshot()
-	// if snapshot != nil && len(snapshot) > 0 {
-	// 	rf.commitIndex = rf.lastSnapshotIndex
-	// 	rf.lastApplied = rf.lastSnapshotIndex
-	// 	// 把快照交给上层应用
-	// 	msg := ApplyMsg{
-	// 		SnapshotValid: true,
-	// 		Snapshot:      snapshot,
-	// 		SnapshotTerm:  rf.lastSnapshotTerm,
-	// 		SnapshotIndex: rf.lastSnapshotIndex,
-	// 	}
-	// 	rf.applyCh <- msg
-	// } else {
-	// 	rf.commitIndex = rf.lastSnapshotIndex
-	// 	rf.lastApplied = rf.lastSnapshotIndex
-	// }
 }
 
 // the service says it has created a snapshot that has
@@ -214,20 +200,17 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	reply.Term = rf.currentTerm
 
-	if rf.currentTerm > args.Term { // Don't accept. Because currentTerm is lastest.
-		return
-	}
 	if args.Term > rf.currentTerm || rf.state != State.Follower {
 		rf.state = State.Follower
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
 		rf.persist()
 	}
-	// Always reset election timeout when receiving valid InstallSnapshot from leader
-	rf.ResetElectionTimeout()
-	if rf.lastSnapshotIndex >= args.LastIncludedIndex { // No need to continue beacuse it already included.
+	if args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.lastSnapshotIndex {
 		return
 	}
+	// Always reset election timeout when receiving valid InstallSnapshot from leader
+	rf.ResetElectionTimeout()
 
 	lastIncludedTerm, lastIncludedIndex := args.LastIncludedTerm, args.LastIncludedIndex
 	lastIndex := rf.getLastLog().Index
@@ -237,12 +220,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	} else {
 		// Snapshot covers part of our log, trim the covered part
 		installLen := lastIncludedIndex - rf.lastSnapshotIndex
-		if installLen >= len(rf.log) {
-			// Safety check: if trying to trim more than we have, replace entire log
-			rf.log = make([]LogEntry, 1)
-		} else {
-			rf.log = reallocateEntriesArray(rf.log[installLen:])
-		}
+		rf.log = reallocateEntriesArray(rf.log[installLen:])
 	}
 	rf.log[0] = LogEntry{Term: lastIncludedTerm, Index: lastIncludedIndex, Command: nil} //use dummy head as snapshot record
 	rf.lastSnapshotIndex, rf.lastSnapshotTerm = lastIncludedIndex, lastIncludedTerm
@@ -269,104 +247,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 }
 
-// func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-// 	rf.mu.Lock()
-
-// 	reply.Term = rf.currentTerm
-
-// 	// Reply term should reflect currentTerm at return time; set later.
-// 	// If args.Term is stale, reject quickly.
-// 	if args.Term < rf.currentTerm {
-// 		reply.Term = rf.currentTerm
-// 		rf.mu.Unlock()
-// 		return
-// 	}
-
-// 	// If incoming term is greater, update term and convert to follower.
-// 	if args.Term > rf.currentTerm || rf.state != State.Follower {
-// 		rf.state = State.Follower
-// 		rf.votedFor = -1
-// 		rf.currentTerm = args.Term
-// 		rf.persist()
-// 	}
-
-// 	// Reset election timeout on valid InstallSnapshot
-// 	rf.ResetElectionTimeout()
-
-// 	// If we already have a snapshot at least as new, nothing to do.
-// 	if rf.lastSnapshotIndex >= args.LastIncludedIndex {
-// 		rf.mu.Unlock()
-// 		return
-// 	}
-
-// 	// Apply the snapshot: trim or replace log accordingly.
-// 	lastIncludedTerm, lastIncludedIndex := args.LastIncludedTerm, args.LastIncludedIndex
-// 	snapData := args.Data
-
-// 	lastIndex := rf.getLastLog().Index
-
-// 	if lastIncludedIndex > lastIndex {
-// 		// Snapshot covers beyond our current log: replace entire log with dummy head.
-// 		rf.log = make([]LogEntry, 1)
-// 	} else {
-// 		// Trim the covered entries from rf.log.
-// 		installLen := lastIncludedIndex - rf.lastSnapshotIndex
-// 		if installLen >= len(rf.log) {
-// 			// safety: if try to trim more than we have, replace entire log
-// 			rf.log = make([]LogEntry, 1)
-// 		} else {
-// 			rf.log = reallocateEntriesArray(rf.log[installLen:])
-// 		}
-// 	}
-// 	// set dummy head as the snapshot record
-// 	rf.log[0] = LogEntry{Term: lastIncludedTerm, Index: lastIncludedIndex, Command: nil}
-// 	rf.lastSnapshotIndex = lastIncludedIndex
-// 	rf.lastSnapshotTerm = lastIncludedTerm
-
-// 	// advance applied/commit indices to the snapshot
-// 	rf.lastApplied = lastIncludedIndex
-// 	rf.commitIndex = lastIncludedIndex
-
-// 	// Persist both raft state and snapshot atomically
-// 	// (getPersistState encodes currentTerm, votedFor, lastSnapshotTerm/Index, log)
-// 	snapshotData := make([]byte, len(args.Data))
-// 	copy(snapshotData, args.Data) // copy just in case
-// 	rf.persister.Save(rf.getPersistState(), snapshotData)
-
-// 	rf.persister.Save(rf.getPersistState(), snapData)
-
-// 	// Signal applier if anyone is waiting (harmless)
-// 	rf.applierCond.Signal()
-
-// 	// IMPORTANT: release lock before sending on applyCh to avoid blocking while holding lock
-// 	rf.mu.Unlock()
-
-// 	// Send snapshot ApplyMsg to the service (do this *without* holding rf.mu)
-// 	if snapData != nil {
-// 		rf.applyCh <- ApplyMsg{
-// 			SnapshotValid: true,
-// 			Snapshot:      snapData,
-// 			SnapshotTerm:  lastIncludedTerm,
-// 			SnapshotIndex: lastIncludedIndex,
-// 		}
-// 	} else {
-// 		// 如果 snapData 是 nil，仍然发送（测试/调用方可能期望收到 msg）。
-// 		// 但你也可以选择记录日志并跳过发送，视你的协议而定。
-// 		rf.applyCh <- ApplyMsg{
-// 			SnapshotValid: true,
-// 			Snapshot:      nil,
-// 			SnapshotTerm:  lastIncludedTerm,
-// 			SnapshotIndex: lastIncludedIndex,
-// 		}
-// 	}
-// }
-
 func (rf *Raft) sendInstallSnapshotToPeer(server int) {
 	rf.mu.Lock()
-	if rf.state != State.Leader {
-		rf.mu.Unlock()
-		return
-	}
+
 	snap := rf.persister.ReadSnapshot()
 	DPrintf("{Node %v} (leader) preparing InstallSnapshot to %v: lastIncludedIndex=%d term=%d snapLen=%d",
 		rf.me, server, rf.lastSnapshotIndex, rf.lastSnapshotTerm, len(snap))
@@ -383,17 +266,8 @@ func (rf *Raft) sendInstallSnapshotToPeer(server int) {
 	rf.mu.Unlock()
 
 	reply := &InstallSnapshotReply{}
-	// ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, reply)
 
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
-	// DPrintf("Success InstallSnapshot? %v\n", ok)
-	// if !ok {
-	// 	// RPC failed, will be retried later by replicator
-	// 	return
-	// }
-
-	// 使用goroutine + channel 实现超时
+	// use goroutine + channel to establish timeout
 	resultCh := make(chan bool, 1)
 	go func() {
 		ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, reply)
@@ -447,28 +321,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 
 	snapshotIndex := rf.lastSnapshotIndex
-	if snapshotIndex >= index {
-		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
-		return
-	}
 
 	// Get the term of the index being snapshotted before modifying the log
 	snapshotTerm := rf.getLogTerm(index)
-	if snapshotTerm == -1 {
-		// If we can't find the term, this shouldn't happen in normal operation
-		DPrintf("{Node %v} ERROR: cannot find term for snapshot index %v", rf.me, index)
-		return
-	}
 
 	// Calculate how many entries to trim from the log
 	trimCount := index - snapshotIndex
-	if trimCount >= len(rf.log) {
-		// If we're trimming more than the log length, create a new log with just the dummy entry
-		rf.log = make([]LogEntry, 1)
-	} else {
-		// Normal case: trim the log and keep the rest
-		rf.log = reallocateEntriesArray(rf.log[trimCount:])
+
+	if trimCount <= 0 {
+		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
+		return
 	}
+	rf.log = reallocateEntriesArray(rf.log[trimCount:])
 
 	// Set the dummy head to represent the snapshot
 	rf.log[0] = LogEntry{Term: snapshotTerm, Index: index, Command: nil}
@@ -567,32 +431,25 @@ func (rf *Raft) replicateOneRound(peer int) {
 	// Get the previous log index for this peer
 	prevLogIndex := rf.nextIndex[peer] - 1
 
-	if prevLogIndex < rf.getFirstLog().Index {
+	if prevLogIndex < rf.getFirstLog().Index && rf.lastSnapshotIndex > 0 {
 		// need to send snapshot - peer is too far behind
+		DPrintf("prevLogIndex: %d, getFirstLog.Index: %d\n", prevLogIndex, rf.getFirstLog().Index)
 		rf.mu.Unlock()
 		rf.sendInstallSnapshotToPeer(peer)
 	} else {
-		// send log entries
+		// prepare args for sendAppendEntries
 		prevLogTerm := 0
 		if prevLogIndex > 0 {
 			prevLogTerm = rf.getLogTerm(prevLogIndex)
-			if prevLogTerm == -1 {
-				prevLogTerm = 0
-			}
 		}
 
 		// Get entries to send (from nextIndex[peer] onwards)
 		firstIndex := rf.getFirstLog().Index
 		entries := make([]LogEntry, 0)
-		if rf.nextIndex[peer] <= rf.getLastLog().Index {
-			startIdx := rf.nextIndex[peer] - firstIndex
-			if startIdx < 0 {
-				startIdx = 0
-			}
-			if startIdx < len(rf.log) {
-				entries = make([]LogEntry, len(rf.log[startIdx:]))
-				copy(entries, rf.log[startIdx:])
-			}
+		startIdx := rf.nextIndex[peer] - firstIndex
+		if startIdx < len(rf.log) {
+			entries = make([]LogEntry, len(rf.log[startIdx:]))
+			copy(entries, rf.log[startIdx:])
 		}
 
 		args := &AppendEntriesArgs{
@@ -603,12 +460,13 @@ func (rf *Raft) replicateOneRound(peer int) {
 			Entries:      entries,
 			LeaderCommit: rf.commitIndex,
 		}
+		currentTerm := rf.currentTerm // Capture term before unlocking
 		rf.mu.Unlock()
 
 		reply := &AppendEntriesReply{}
-		DPrintf("{Node %v} sending AppendEntries to {Node %v} in term %v", rf.me, peer, rf.currentTerm)
+		DPrintf("{Node %v} sending AppendEntries to {Node %v} in term %v", rf.me, peer, currentTerm)
 		DPrintf("Arg: %v\n", args)
-		
+
 		if rf.sendAppendEntries(peer, args, reply) {
 			DPrintf("{Node %v} AppendEntries RPC to {Node %v} succeeded", rf.me, peer)
 			rf.handleAppendEntriesReply(peer, args, reply)
@@ -622,9 +480,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-
-	// DPrintf("{Node %v} receives AppendEntries from {Node %v} in term %v (my term: %v, my state: %v)",
-	//	rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
 
 	// Reply false if term < currentTerm
 	// Only change to follower if term is equal and we're not already follower
@@ -654,21 +509,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.leaderId = args.LeaderId
 
 	// (3B) Reply false if log doesn't contain an entry at prevLogIndex
-	// if args.PrevLogIndex < rf.getFirstLog().Index {
-	// 	reply.Success = false
-	// 	reply.Term = 0
-	// 	DPrintf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v < firstLogIndex %v", rf.me, args, args.LeaderId, args.PrevLogIndex, rf.getFirstLog().Index)
-	// 	return
-	// }
-
-	// prevLogIndex 在快照之前，直接让 Leader 发送快照
+	// PrevLogIndex before snapshot, send snapsort
 	if args.PrevLogIndex < rf.getFirstLog().Index {
 		reply.Success = false
 		reply.ConflictIndex = rf.getFirstLog().Index
 		return
 	}
 
-	// prevLogIndex 超出本地日志范围
+	// prevLogIndex out of range
 	if args.PrevLogIndex > rf.getLastLog().Index {
 		reply.Success = false
 		reply.ConflictIndex = rf.getLastLog().Index + 1
@@ -767,7 +615,7 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 		}
 
 		if rf.nextIndex[peer] < rf.getFirstLog().Index+1 {
-			rf.nextIndex[peer] = rf.getFirstLog().Index + 1
+			rf.nextIndex[peer] = rf.getFirstLog().Index
 		}
 
 		// Signal replicator to retry after conflict resolution
@@ -823,146 +671,29 @@ func (rf *Raft) applier() {
 		}
 		firstIndex, commitIndex, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
 
-		// Ensure we don't go out of bounds
-		if lastApplied < commitIndex && lastApplied >= firstIndex-1 {
-			entriesToApply := make([]LogEntry, 0, commitIndex-lastApplied)
-			startIdx := lastApplied + 1 - firstIndex
-			endIdx := commitIndex + 1 - firstIndex
+		entriesToApply := make([]LogEntry, 0, commitIndex-lastApplied)
+		startIdx := lastApplied + 1 - firstIndex
+		endIdx := commitIndex + 1 - firstIndex
+		entriesToApply = append(entriesToApply, rf.log[startIdx:endIdx]...)
+		rf.mu.Unlock()
 
-			// Bounds check
-			if startIdx < 0 {
-				startIdx = 0
+		for _, logEntry := range entriesToApply {
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      logEntry.Command,
+				CommandIndex: logEntry.Index,
 			}
-			if endIdx > len(rf.log) {
-				endIdx = len(rf.log)
-			}
-			if startIdx < endIdx && startIdx < len(rf.log) {
-				entriesToApply = append(entriesToApply, rf.log[startIdx:endIdx]...)
-			}
+			rf.applyCh <- applyMsg
 
-			rf.mu.Unlock()
-
-			for _, logEntry := range entriesToApply {
-				applyMsg := ApplyMsg{
-					CommandValid: true,
-					Command:      logEntry.Command,
-					CommandIndex: logEntry.Index,
-				}
-				rf.applyCh <- applyMsg
-
-				rf.mu.Lock()
-				// Only update if this entry is newer than current lastApplied
-				if logEntry.Index > rf.lastApplied {
-					rf.lastApplied = logEntry.Index
-				}
-				rf.mu.Unlock()
+			rf.mu.Lock()
+			// Only update if this entry is newer than current lastApplied
+			if logEntry.Index > rf.lastApplied {
+				rf.lastApplied = logEntry.Index
 			}
-		} else {
 			rf.mu.Unlock()
 		}
 	}
 }
-
-// // applier（修复版）：保持原有逻辑，但更稳健地处理提交区间的条目应用
-// func (rf *Raft) applier() {
-// 	for rf.killed() == false {
-// 		rf.mu.Lock()
-// 		for rf.lastApplied >= rf.commitIndex {
-// 			rf.applierCond.Wait()
-// 			if rf.killed() {
-// 				rf.mu.Unlock()
-// 				return
-// 			}
-// 		}
-
-// 		// 计算需要应用的范围（基于当前的 firstLog/commitIndex/lastApplied）
-// 		firstIndex := rf.getFirstLog().Index
-// 		commitIndex := rf.commitIndex
-// 		lastApplied := rf.lastApplied
-
-// 		// 拷贝要应用的日志条目到局部变量（在释放锁后逐个发送到 applyCh）
-// 		entriesToApply := make([]LogEntry, 0)
-// 		if commitIndex > lastApplied {
-// 			entriesToApply = make([]LogEntry, commitIndex-lastApplied)
-// 			copy(entriesToApply, rf.log[lastApplied+1-firstIndex:commitIndex+1-firstIndex])
-// 		}
-// 		rf.mu.Unlock()
-
-// 		// 逐个发送日志条目到 applyCh（不持锁）
-// 		for _, logEntry := range entriesToApply {
-// 			applyMsg := ApplyMsg{
-// 				CommandValid: true,
-// 				Command:      logEntry.Command,
-// 				CommandIndex: logEntry.Index,
-// 			}
-// 			rf.applyCh <- applyMsg
-
-// 			rf.mu.Lock()
-// 			// 只有当没有被别处更新（例如 InstallSnapshot）才更新 lastApplied
-// 			if logEntry.Index > rf.lastApplied {
-// 				rf.lastApplied = logEntry.Index
-// 			}
-// 			rf.mu.Unlock()
-// 		}
-// 	}
-// }
-
-// func (rf *Raft) applier() {
-// 	for rf.killed() == false {
-// 		rf.mu.Lock()
-// 		for rf.lastApplied >= rf.commitIndex && rf.lastApplied >= rf.lastSnapshotIndex {
-// 			// 没有新的日志或快照需要 apply
-// 			rf.applierCond.Wait()
-// 		}
-
-// 		// 情况 1：需要应用快照
-// 		if rf.lastApplied < rf.lastSnapshotIndex {
-// 			msg := ApplyMsg{
-// 				SnapshotValid: true,
-// 				Snapshot:      rf.persister.ReadSnapshot(), // 从持久化层拿快照
-// 				SnapshotTerm:  rf.lastSnapshotTerm,
-// 				SnapshotIndex: rf.lastSnapshotIndex,
-// 			}
-// 			rf.lastApplied = rf.lastSnapshotIndex
-// 			rf.mu.Unlock()
-
-// 			rf.applyCh <- msg
-// 			continue
-// 		}
-
-// 		// 情况 2：需要应用日志
-// 		firstIndex := rf.getFirstLog().Index
-// 		commitIndex, lastApplied := rf.commitIndex, rf.lastApplied
-// 		entries := make([]LogEntry, commitIndex-lastApplied)
-// 		copy(entries, rf.log[lastApplied+1-firstIndex:commitIndex+1-firstIndex])
-
-// 		rf.mu.Unlock()
-
-// 		for _, entry := range entries {
-// 			msg := ApplyMsg{
-// 				CommandValid: true,
-// 				Command:      entry.Command,
-// 				CommandIndex: entry.Index,
-// 			}
-// 			rf.applyCh <- msg
-
-// 			rf.mu.Lock()
-// 			rf.lastApplied = entry.Index
-// 			rf.mu.Unlock()
-// 		}
-// 	}
-// }
-
-// func (rf *Raft) replicator(peer int) {
-// 	rf.replicatorCond[peer].L.Lock()
-// 	defer rf.replicatorCond[peer].L.Unlock()
-// 	for rf.killed() == false {
-// 		for !rf.needReplicating(peer) {
-// 			rf.replicatorCond[peer].Wait()
-// 		}
-// 		rf.replicateOneRound(peer)
-// 	}
-// }
 
 func (rf *Raft) replicator(peer int) {
 	rf.replicatorCond[peer].L.Lock()
@@ -973,21 +704,7 @@ func (rf *Raft) replicator(peer int) {
 			rf.replicatorCond[peer].Wait()
 		}
 
-		// 执行复制
 		rf.replicateOneRound(peer)
-
-		// 如果是快照复制失败，稍等片刻再重试
-		rf.mu.Lock()
-		isLeader := rf.state == State.Leader
-		stillBehind := rf.nextIndex[peer] <= rf.getFirstLog().Index
-		rf.mu.Unlock()
-
-		if isLeader && stillBehind {
-			// 快照发送可能失败了，等待片刻后让循环重试
-			rf.replicatorCond[peer].L.Unlock()
-			time.Sleep(50 * time.Millisecond)
-			rf.replicatorCond[peer].L.Lock()
-		}
 	}
 }
 
@@ -1205,13 +922,13 @@ func (rf *Raft) StartElection() {
 	rf.state = State.Candidate // change state to candidate
 	rf.currentTerm += 1        // increment current term
 	rf.votedFor = rf.me        // vote for self
-
-	rf.persist() // Must persist state changes immediately
+	term := rf.currentTerm     // avoid data race
+	rf.persist()               // Must persist state changes immediately
 
 	// Use getLastLog() for consistent log index calculation
 	lastLog := rf.getLastLog()
 	voteArgs := RequestVoteArgs{
-		Term:         rf.currentTerm,
+		Term:         term,
 		CandidateId:  rf.me,
 		LastLogIndex: lastLog.Index,
 		LastLogTerm:  lastLog.Term,
@@ -1240,12 +957,12 @@ func (rf *Raft) StartElection() {
 							// Reinitialize leader state (Figure 2)
 							// Use very conservative approach for potentially disconnected peers
 							lastLogIndex := rf.getLastLog().Index
-							firstLogIndex := rf.getFirstLog().Index
+							// firstLogIndex := rf.getFirstLog().Index
 							for i := range rf.nextIndex {
 								if i != rf.me {
 									// Start from first log index (most conservative)
 									// This will trigger snapshot installation for lagging peers
-									rf.nextIndex[i] = firstLogIndex
+									rf.nextIndex[i] = lastLogIndex + 1
 									rf.matchIndex[i] = 0
 								} else {
 									rf.matchIndex[i] = lastLogIndex
