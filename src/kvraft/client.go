@@ -1,13 +1,23 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"log"
+	"math/big"
+	"time"
 
+	"6.5840/labrpc"
+)
+
+const (
+	ChangeLeaderInterval = time.Millisecond * 20
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientID int64
+	leaderID int
 }
 
 func nrand() int64 {
@@ -20,6 +30,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.clientID = nrand()
 	// You'll have to add code here.
 	return ck
 }
@@ -36,8 +47,42 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 
-	// You will have to modify this function.
-	return ""
+	args := &GetArgs{
+		Key:       key,
+		ClientID:  ck.clientID,
+		CommandID: nrand(),
+	}
+	leaderID := ck.leaderID
+
+	for {
+		reply := &GetReply{}
+		ok := ck.servers[leaderID].Call("KVServer.Get", args, reply)
+		if !ok {
+			// Wait a litte while, and change to another server
+			DPrintf("%v client get key %v from server %v, not ok.", ck.clientID, key, leaderID)
+			time.Sleep(ChangeLeaderInterval)
+			leaderID = (leaderID + 1) % len(ck.servers)
+			continue
+		} else if reply.Err != OK {
+			DPrintf("%v client get key %v from server %v,reply err = %v!", ck.clientID, key, leaderID, reply.Err)
+		}
+		switch reply.Err {
+		case OK:
+			DPrintf("%v client get key %v from server %v,value: %v, OK.", ck.clientID, key, leaderID, reply.Value)
+			ck.leaderID = leaderID
+			return reply.Value
+		case ErrNoKey:
+			DPrintf("%v client get key %v from server %v, NO KEY!", ck.clientID, key, leaderID)
+			ck.leaderID = leaderID
+			return ""
+		case ErrTimeOut:
+			continue
+		default:
+			time.Sleep(ChangeLeaderInterval)
+			leaderID = (leaderID + 1) % len(ck.servers)
+			continue
+		}
+	}
 }
 
 // shared by Put and Append.
@@ -50,6 +95,52 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := &PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		ClientID:  ck.clientID,
+		CommandID: nrand(),
+	}
+	leaderID := ck.leaderID
+
+	for {
+		reply := &PutAppendReply{}
+		ok := ck.servers[leaderID].Call("KVServer.PutAppend", args, reply)
+		if !ok {
+			// Wait a litte while, and change to another server
+			DPrintf("%v client get key %v from server %v, not ok.", ck.clientID, key, leaderID)
+			time.Sleep(ChangeLeaderInterval)
+			leaderID = (leaderID + 1) % len(ck.servers)
+			continue
+		} else if reply.Err != OK {
+			DPrintf("%v client get key %v from server %v,reply err = %v!", ck.clientID, key, leaderID, reply.Err)
+		}
+		switch reply.Err {
+		case OK:
+			DPrintf("%v client get key %v from server %v,value: %v, OK.", ck.clientID, key, leaderID, value)
+			ck.leaderID = leaderID
+			return
+		case ErrNoKey:
+			DPrintf("%v client get key %v from server %v, NO KEY!", ck.clientID, key, leaderID)
+			ck.leaderID = leaderID
+			return
+		case ErrTimeOut:
+			continue
+		case ErrWrongLeader:
+			//换一个节点继续请求
+			time.Sleep(ChangeLeaderInterval)
+			leaderID = (leaderID + 1) % len(ck.servers)
+			continue
+		case ErrServer:
+			//换一个节点继续请求
+			time.Sleep(ChangeLeaderInterval)
+			leaderID = (leaderID + 1) % len(ck.servers)
+			continue
+		default:
+			log.Fatal("client rev unknown err", reply.Err)
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
