@@ -194,6 +194,7 @@ type InstallSnapshotReply struct {
 	Term int
 }
 
+// follower install snapshot from leader
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -247,6 +248,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 }
 
+// leader send snapshot to one peer server
 func (rf *Raft) sendInstallSnapshotToPeer(server int) {
 	rf.mu.Lock()
 
@@ -314,6 +316,7 @@ func (rf *Raft) sendInstallSnapshotToPeer(server int) {
 	rf.replicatorCond[server].Signal()
 }
 
+// create a new snapshot
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 
@@ -444,6 +447,8 @@ func (rf *Raft) replicateOneRound(peer int) {
 		}
 
 		// Get entries to send (from nextIndex[peer] onwards)
+		// leader has a nextIndex list of all peer,
+		// so can know how much the peer is left behind
 		firstIndex := rf.getFirstLog().Index
 		entries := make([]LogEntry, 0)
 		startIdx := rf.nextIndex[peer] - firstIndex
@@ -466,10 +471,10 @@ func (rf *Raft) replicateOneRound(peer int) {
 		reply := &AppendEntriesReply{}
 		DPrintf("{Node %v} sending AppendEntries to {Node %v} in term %v", rf.me, peer, currentTerm)
 		DPrintf("Arg: %v\n", args)
-
+		// call rpc for AppendEntries, to let follower handle req
 		if rf.sendAppendEntries(peer, args, reply) {
 			DPrintf("{Node %v} AppendEntries RPC to {Node %v} succeeded", rf.me, peer)
-			rf.handleAppendEntriesReply(peer, args, reply)
+			rf.handleAppendEntriesReply(peer, args, reply) // leader get the resp from follower and need to commit/retry
 		} else {
 			DPrintf("{Node %v} AppendEntries RPC to {Node %v} FAILED", rf.me, peer)
 		}
@@ -488,7 +493,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = State.Follower
 		rf.leaderId = args.LeaderId
 	}
-
+	// current term is bigger than args, we're the leader, return false
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -523,8 +528,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	// conflict resolution for fast backup (Follower)
-	// If follower's log too short, tell leader to newtIndex = last log index + 1
-	// If term conflict, tell leader the conflict term and the first index of that term
+	// If follower's log too short, tell leader to ConflictIndex = last log index + 1
+	// If follower log idx is greater, tell leader the conflict term and the first index of that term, then based on the leader
 	if !rf.matchLog(args.PrevLogIndex, args.PrevLogTerm) {
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -547,6 +552,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.me, reply.ConflictIndex, reply.ConflictTerm)
 		return
 	}
+	// no conflict
 	// Append new entries
 	firstIndex := rf.getFirstLog().Index
 	for index, entry := range args.Entries {
@@ -623,6 +629,7 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 	}
 }
 
+// to see if the ack follower is greater than len(rf.peers)/2
 func (rf *Raft) tryCommit() {
 	// rf.commitIndex can be ZERO due to Volatile,
 	// the best way to avoid it is to ONLY COMMIT CURRENT TERM
@@ -643,6 +650,7 @@ func (rf *Raft) tryCommit() {
 	}
 }
 
+// leader commit the logs, follower can apply too
 func (rf *Raft) advanceCommitIndex(newCommitIndex int) {
 	lastLogIndex := rf.getLastLog().Index
 	if newCommitIndex > lastLogIndex {
@@ -654,11 +662,12 @@ func (rf *Raft) advanceCommitIndex(newCommitIndex int) {
 	if newCommitIndex > rf.commitIndex {
 		DPrintf("%v current commit: %v -> %v", rf.me, rf.commitIndex, newCommitIndex)
 		rf.commitIndex = newCommitIndex
-		rf.applierCond.Signal()
+		rf.applierCond.Signal() //signal followers
 	}
 
 }
 
+// send apply message to all follower by apply chan
 func (rf *Raft) applier() {
 	for rf.killed() == false {
 		rf.mu.Lock()
@@ -695,6 +704,7 @@ func (rf *Raft) applier() {
 	}
 }
 
+// each follower has a replicator to handle its logs conflict
 func (rf *Raft) replicator(peer int) {
 	rf.replicatorCond[peer].L.Lock()
 	defer rf.replicatorCond[peer].L.Unlock()
@@ -708,6 +718,7 @@ func (rf *Raft) replicator(peer int) {
 	}
 }
 
+// leader find a peer idx is behind leader, it needs replicate
 func (rf *Raft) needReplicating(peer int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -752,6 +763,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 	}
+	// follower has voted, ignore all the rest request
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -844,7 +856,7 @@ func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
 					rf.replicateOneRound(peer)
 				}(i)
 			} else {
-				// just signal replicator goroutine to send entries in batch
+				// just signal replicator goroutine to send entries in batch, used in Start
 				rf.replicatorCond[i].Signal()
 			}
 		}
@@ -884,6 +896,8 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 
+		// heartbeatTimeout << electionTimeout << MTBF (mean time between failures)
+		// heartbeatTimeout << electionTimeout because leader can use heartbeatTimeout to reset election
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		// ms := 50 + (rand.Int63() % 300)
@@ -948,7 +962,7 @@ func (rf *Raft) StartElection() {
 				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, reply, peer, voteArgs, rf.currentTerm)
 				if rf.currentTerm == voteArgs.Term && rf.state == State.Candidate {
 					if reply.VoteGranted {
-						currentVotes := atomic.AddInt32(&grantedVotes, 1)
+						currentVotes := atomic.AddInt32(&grantedVotes, 1) // atomic counter for counting
 						if int(currentVotes) > len(rf.peers)/2 {
 							DPrintf("{Node %v} receives majority votes in term %v, becoming Leader", rf.me, rf.currentTerm)
 							rf.state = State.Leader
@@ -970,11 +984,11 @@ func (rf *Raft) StartElection() {
 							}
 
 							// Start heartbeat immediately and reset both timers
-							rf.ResetElectionTimeout() // Leader should not timeout
+							rf.ResetElectionTimeout() // Leader should not time out
 							rf.ResetHeartbeatTimeout()
-							rf.BroadcastHeartbeat(true)
+							rf.BroadcastHeartbeat(true) //tell a leader has elected
 						}
-					} else if reply.Term > rf.currentTerm {
+					} else if reply.Term > rf.currentTerm { // candidate finds other leader
 						DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
 						rf.state = State.Follower
 						rf.currentTerm, rf.votedFor = reply.Term, -1
@@ -1030,12 +1044,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
-	go rf.applier()
+	go rf.ticker()  // for elect time out and heart time out
+	go rf.applier() // for follower to apply commit using applyChan
 	for i := 0; i < len(peers); i++ {
 		if i != rf.me {
 			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
 			// start replicator goroutine to replicate entries in batch
+			// because each follower needs replicate, so it's better to 1 replicator 1 follower
 			go rf.replicator(i)
 		}
 	}
